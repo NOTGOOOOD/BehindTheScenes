@@ -1,6 +1,9 @@
 import math
 import os
-
+import sys
+import yaml
+sys.path.insert(0, os.path.abspath(os.path.dirname(os.path.dirname(__file__))))
+sys.path.insert(0, os.path.abspath(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))))
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -18,6 +21,7 @@ from models.bts.model.ray_sampler import ImageRaySampler
 from utils.base_evaluator import base_evaluation
 from utils.metrics import MeanMetric
 from utils.projection_operations import distance_to_z
+import open3d as o3d
 
 
 IDX = 0
@@ -25,11 +29,11 @@ EPS = 1e-4
 
 # The KITTI 360 cameras have a 5 degrees negative inclination. We need to account for that.
 cam_incl_adjust = torch.tensor(
-    [  [1.0000000,  0.0000000,  0.0000000, 0],
-       [0.0000000,  0.9961947,  0.0871557, 0],
-       [0.0000000, -0.0871557,  0.9961947, 0],
-       [0.0000000,  000000000,  0.0000000, 1]
-    ],
+    [[1.0000000,  0.0000000,  0.0000000, 0],
+     [0.0000000,  0.9961947,  0.0871557, 0],
+     [0.0000000, -0.0871557,  0.9961947, 0],
+     [0.0000000,  000000000,  0.0000000, 1]
+     ],
     dtype=torch.float32
 ).view(1, 1, 4, 4)
 
@@ -39,12 +43,16 @@ def get_pts(x_range, y_range, z_range, ppm, ppm_y, y_res=None):
     if y_res is None:
         y_res = abs(int((y_range[1] - y_range[0]) * ppm_y))
     z_res = abs(int((z_range[1] - z_range[0]) * ppm))
-    x = torch.linspace(x_range[0], x_range[1], x_res).view(1, 1, x_res).expand(y_res, z_res, -1)
-    z = torch.linspace(z_range[0], z_range[1], z_res).view(1, z_res, 1).expand(y_res, -1, x_res)
+    x = torch.linspace(x_range[0], x_range[1], x_res).view(
+        1, 1, x_res).expand(y_res, z_res, -1)
+    z = torch.linspace(z_range[0], z_range[1], z_res).view(
+        1, z_res, 1).expand(y_res, -1, x_res)
     if y_res == 1:
-        y = torch.tensor([y_range[0] * .5 + y_range[1] * .5]).view(y_res, 1, 1).expand(-1, z_res, x_res)
+        y = torch.tensor([y_range[0] * .5 + y_range[1] * .5]
+                         ).view(y_res, 1, 1).expand(-1, z_res, x_res)
     else:
-        y = torch.linspace(y_range[0], y_range[1], y_res).view(y_res, 1, 1).expand(-1, z_res, x_res)
+        y = torch.linspace(y_range[0], y_range[1], y_res).view(
+            y_res, 1, 1).expand(-1, z_res, x_res)
     xyz = torch.stack((x, y, z), dim=-1)
 
     return xyz, (x_res, y_res, z_res)
@@ -76,10 +84,13 @@ def get_lidar_slices(point_clouds, velo_poses, y_range, y_res, max_dist):
         for pc, velo_pose in zip(point_clouds, velo_poses):
             pc_world = (velo_pose @ pc.T).T
 
-            mask = ((pc_world[:, 1] >= min_y) & (pc_world[:, 1] <= max_y)) | (torch.norm(pc_world[:, :3], dim=-1) >= max_dist)
-
+            mask = ((pc_world[:, 1] >= min_y) & (pc_world[:, 1] <= max_y)) | (
+                torch.norm(pc_world[:, :3], dim=-1) >= max_dist)
+            
             slice_points = pc[mask, :2]
-
+            lidar_points_pcd = xyz2pcd(pc[:,:3].numpy(), color=[0, 0, 0.7])
+            world_points_pcd = xyz2pcd(pc_world[:,:3].numpy(), color=[0, 0, 0.7])
+            # show_point([lidar_points_pcd])
             angles = torch.atan2(slice_points[:, 1], slice_points[:, 0])
             dists = torch.norm(slice_points, dim=-1)
 
@@ -87,13 +98,16 @@ def get_lidar_slices(point_clouds, velo_poses, y_range, y_res, max_dist):
             # Sort by angles for fast lookup
             slice_points_polar = slice_points_polar[torch.sort(angles)[1], :]
 
-            slice_points_polar_binned = torch.zeros_like(slice_points_polar[:n_bins, :])
-            bin_borders = torch.linspace(-math.pi, math.pi, n_bins+1, device=slice_points_polar.device)
+            slice_points_polar_binned = torch.zeros_like(
+                slice_points_polar[:n_bins, :])
+            bin_borders = torch.linspace(-math.pi, math.pi,
+                                         n_bins+1, device=slice_points_polar.device)
 
             dist = slice_points_polar[0, 1]
 
             # To reduce noise, we bin the lidar points into bins of 1deg and then take the minimum distance per bin.
-            border_is = torch.searchsorted(slice_points_polar[:, 0], bin_borders)
+            border_is = torch.searchsorted(
+                slice_points_polar[:, 0], bin_borders)
 
             for i in range(n_bins):
                 left_i, right_i = border_is[i], border_is[i+1]
@@ -106,7 +120,8 @@ def get_lidar_slices(point_clouds, velo_poses, y_range, y_res, max_dist):
             slice_points_polar = slice_points_polar_binned
 
             # Append first element to last to have full 360deg coverage
-            slice_points_polar = torch.cat(( torch.tensor([[slice_points_polar[-1, 0] - math.pi * 2, slice_points_polar[-1, 1]]], device=slice_points_polar.device), slice_points_polar, torch.tensor([[slice_points_polar[0, 0] + math.pi * 2, slice_points_polar[0, 1]]], device=slice_points_polar.device)), dim=0)
+            slice_points_polar = torch.cat((torch.tensor([[slice_points_polar[-1, 0] - math.pi * 2, slice_points_polar[-1, 1]]], device=slice_points_polar.device),
+                                           slice_points_polar, torch.tensor([[slice_points_polar[0, 0] + math.pi * 2, slice_points_polar[0, 1]]], device=slice_points_polar.device)), dim=0)
 
             slice.append(slice_points_polar)
 
@@ -135,7 +150,8 @@ def check_occupancy(pts, slices, velo_poses, min_dist=3):
             angles = torch.atan2(pts_velo[:, 1], pts_velo[:, 0])
             dists = torch.norm(pts_velo, dim=-1)
 
-            indices = torch.searchsorted(lidar_polar[:, 0].contiguous(), angles)
+            indices = torch.searchsorted(
+                lidar_polar[:, 0].contiguous(), angles)
 
             left_angles = lidar_polar[indices-1, 0]
             right_angles = lidar_polar[indices, 0]
@@ -208,7 +224,8 @@ def save(name, pts, xd, yd, zd):
 def save_all(f, is_occupied, is_occupied_pred, images, xd, yd, zd):
     save(f"{f}_gt.png", is_occupied, xd, yd, zd)
     save(f"{f}_pred.png", is_occupied_pred, xd, yd, zd)
-    plt.imsave(f"{f}_input.png", images[0, 0].permute(1, 2, 0).cpu().numpy() * .5 + .5)
+    plt.imsave(f"{f}_input.png", images[0, 0].permute(
+        1, 2, 0).cpu().numpy() * .5 + .5)
 
 
 class BTSWrapper(nn.Module):
@@ -223,7 +240,7 @@ class BTSWrapper(nn.Module):
         self.occ_threshold = 0.5
 
         self.x_range = (-4, 4)
-        self.y_range = (0, .75)
+        self.y_range = (0, 1)
         self.z_range = (20, 4)
         self.ppm = 10
         self.ppm_y = 4
@@ -239,7 +256,7 @@ class BTSWrapper(nn.Module):
     def get_loss_metric_names():
         return ["loss", "loss_l2", "loss_mask", "loss_temporal"]
 
-    def forward(self, data):
+    def forward_bak(self, data):
         data = dict(data)
         images = torch.stack(data["imgs"], dim=1)                           # n, v, c, h, w
         poses = torch.stack(data["poses"], dim=1)                 # n, v, 4, 4 w2c
@@ -347,20 +364,99 @@ class BTSWrapper(nn.Module):
         return data
 
 
+    def forward(self, data):
+        data = dict(data)
+        # n, v, c, h, w
+        images = torch.stack(data["imgs"], dim=1)
+        # n, v, 4, 4 c2w
+        poses = torch.stack(data["poses"], dim=1)
+        # n, v, 3, 3 (-1, 1)
+        projs = torch.stack(data["projs"], dim=1)
+        index = data["index"].item()
+
+        seq, id, is_right = self.dataset._datapoints[index]
+        seq_len = self.dataset._img_ids[seq].shape[0]
+
+        n, v, c, h, w = images.shape
+        device = images.device
+
+        T_velo_to_pose = torch.tensor(
+            self.dataset._calibs["T_velo_to_pose"], device=device)
+
+        # Our coordinate system is at the same position as cam0, but rotated 5deg up along the x axis to adjust for camera inclination.
+        # Consequently, the xz plane is parallel to the street.
+        world_transform = torch.inverse(poses[:, :1, :, :])
+        world_transform = cam_incl_adjust.to(device) @ world_transform
+        poses = world_transform @ poses
+
+        # Load lidar pointclouds
+        points_all = []
+        world_all = []
+        velo_poses = []
+        for id in range(id, min(id + self.aggregate_timesteps, seq_len)):
+            points = np.fromfile(os.path.join(self.dataset.data_path, "data_3d_raw", seq, "velodyne_points",
+                                 "data", f"{self.dataset._img_ids[seq][id]:010d}.bin"), dtype=np.float32).reshape(-1, 4)
+            points[:, 3] = 1.0
+            points = torch.tensor(points, device=device)
+            velo_pose = world_transform.squeeze(
+            ) @ torch.tensor(self.dataset._poses[seq][id], device=device) @ T_velo_to_pose
+            
+            pc_world = (velo_pose @ points.T).T
+            world_all.append(pc_world)
+            points_all.append(points)
+            velo_poses.append(velo_pose)
+
+        velo_poses = torch.stack(velo_poses, dim=0)
+        world_points_ = torch.cat(world_all, dim=0) 
+        lidar_points_ = torch.cat(points_all, dim=0)  
+        lidar_points_pcd = xyz2pcd(lidar_points_[:,:3].numpy(), color=[0, 0, 0.7])
+        world_points_pcd = xyz2pcd(world_points_[:,:3].numpy(), color=[0, 0.7, 0.7])
+        # show_point([lidar_points_pcd])
+
+        lidar_points_2d = lidar_points_[:, :2]
+        world_points_2d = world_points_[:, :2]
+        # show_2d_point(lidar_points_2d[:, 0], lidar_points_2d[:, 1])
+        
+        mask = (
+        (world_points_[:, 2] >= self.z_range[1]) & (world_points_[:, 2] <= self.z_range[0]) &
+        (world_points_[:, 0] >= self.x_range[0]) & (world_points_[:, 0] <= self.x_range[1]) &
+        (world_points_[:, 1] >= self.y_range[0]) & (world_points_[:, 1] <= self.y_range[1])
+        )
+        world_points_pcd_masked = xyz2pcd(world_points_[mask,:3].numpy(), color=[0, 0.7, 0.7])
+
+        # Get pts xz
+        q_pts, (xd, yd, zd) = get_pts(self.x_range, self.y_range,
+                                      self.z_range, self.ppm, self.ppm_y, self.y_res)
+        q_pts = q_pts.to(images.device).view(-1, 3)
+
+        # is occupied?
+        slices = get_lidar_slices(points_all, velo_poses, self.y_range,
+                                  yd, (self.z_range[0] ** 2 + self.x_range[0] ** 2) ** .5)
+        is_occupied, is_visible = check_occupancy(q_pts, slices, velo_poses)
+
+        # Only not visible points can be occupied
+        is_occupied &= ~is_visible
+
+        return data
+
+
 def evaluation(local_rank, config):
     return base_evaluation(local_rank, config, get_dataflow, initialize, get_metrics)
 
 
 def get_dataflow(config):
     test_dataset = make_test_dataset(config["data"])
-    test_loader = DataLoader(test_dataset, batch_size=1, num_workers=config["num_workers"], shuffle=False, drop_last=False)
+    test_loader = DataLoader(test_dataset, batch_size=1,
+                             num_workers=config["num_workers"], shuffle=False, drop_last=False)
 
     return test_loader
 
 
 def get_metrics(config, device):
-    names = ["o_acc", "o_prec", "o_rec", "ie_acc", "ie_prec", "ie_rec", "t_ie", "t_no_nop_nv"]
-    metrics = {name: MeanMetric((lambda n: lambda x: x["output"][n])(name), device) for name in names}
+    names = ["o_acc", "o_prec", "o_rec", "ie_acc",
+             "ie_prec", "ie_rec", "t_ie", "t_no_nop_nv"]
+    metrics = {name: MeanMetric(
+        (lambda n: lambda x: x["output"][n])(name), device) for name in names}
     return metrics
 
 
@@ -379,5 +475,45 @@ def initialize(config: dict, logger=None):
     return model
 
 
-def visualize(engine: Engine, logger: TensorboardLogger, step: int, tag: str):
-    pass
+def xyz2pcd(xyz, color=None):
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(xyz)
+    if color is not None:
+        pcd.colors = o3d.utility.Vector3dVector(np.ones((xyz.shape[0], 3)) * color)
+
+    return pcd
+
+def show_point(pcd: list):
+    o3d.visualization.draw_geometries(pcd)
+
+def show_2d_point(x, y):
+    plt.scatter(x, y)
+    plt.show()
+
+def plot_polar(theta: np.array, r: np.array):
+    ax = plt.subplot(111, polar=True)
+    ax.scatter(theta, r)
+    plt.show()
+
+if __name__ == "__main__":
+    model_conf_file = "configs/exp_kitti_360.yaml"
+    model_conf = yaml.load(open(model_conf_file, 'r', encoding='utf-8').read(), Loader=yaml.FullLoader)
+
+    model_conf.update(data = {
+        "type": "KITTI_360",
+        "data_path": "data/KITTI-360",
+        "pose_path": "data/KITTI-360/data_poses",
+        # "split_path": "datasets/kitti_360/splits/seg",
+        "image_size": [192, 640],
+        "data_stereo": True,
+        "data_fc": 2,
+        "fisheye_rotation": -15,
+        "fisheye_offset": 10,
+        "is_preprocessed": False
+    }) 
+
+    test_loader = get_dataflow(model_conf)
+    model = initialize(model_conf)
+
+    for batch, data in enumerate(test_loader):
+        model(data)
