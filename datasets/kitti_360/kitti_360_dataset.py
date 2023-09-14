@@ -578,7 +578,7 @@ class Kitti360Dataset(Dataset):
         imgs_f_right = [self.process_img(img, color_aug_fn=color_aug_fn, resampler=self._resampler_03) for img in imgs_f_right]
         _processing_time = np.array(time.time() - _start_time_processing)
 
-        # These poses are camera to world !!
+        # poses are imu2world, These opretions are camera to world !!
         poses_p_left = [self._poses[sequence][i, :, :] @ self._calibs["T_cam_to_pose"]["00"] for i in ids] if load_left else []
         poses_f_left = [self._poses[sequence][i, :, :] @ self._calibs["T_cam_to_pose"]["02"] for i in ids_fish] if load_left else []
         poses_p_right = [self._poses[sequence][i, :, :] @ self._calibs["T_cam_to_pose"]["01"] for i in ids] if load_right else []

@@ -182,7 +182,7 @@ def make_test_dataset(config):
         test_dataset = Kitti360Dataset(
             data_path=config["data_path"],
             pose_path=config["pose_path"],
-            split_path=os.path.join(config.get("split_path", None), "test_files.txt"),
+            split_path= os.path.join(config.get("split_path", None), "test_files.txt") if config.get("split_path", None) is not None else None,
             target_image_size=tuple(config.get("image_size", (192, 640))),
             frame_count=config.get("data_fc", 1),
             return_stereo=config.get("data_stereo", False),
